@@ -1,99 +1,312 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import {
+  App,
+  Menu,
+  Modal,
+  Notice,
+  Plugin,
+  TFile,
+  parseYaml,
+  stringifyYaml,
+} from "obsidian";
+import {
+  DEFAULT_SETTINGS,
+  VaultPermalinkSettingTab,
+  VaultPermalinkSettings,
+} from "./settings";
 
-// Remember to rename these classes and interfaces!
+const LEGACY_FRONTMATTER_KEYS = ["persistent_id"];
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class VaultPermalinkKitPlugin extends Plugin {
+  settings: VaultPermalinkSettings = { ...DEFAULT_SETTINGS };
 
-	async onload() {
-		await this.loadSettings();
+  async onload() {
+    await this.loadSettings();
+    this.registerFileMenu();
+    this.registerProtocolHandler();
+    this.addSettingTab(new VaultPermalinkSettingTab(this.app, this));
+  }
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
+  private async loadSettings() {
+    const stored = await this.loadData();
+    this.settings = { ...DEFAULT_SETTINGS, ...(stored ?? {}) };
+  }
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+  private registerFileMenu() {
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu: Menu, file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") {
+          return;
+        }
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			}
-		});
+        menu.addItem((item) => {
+          item
+            .setTitle("Copy Persistent URL")
+            .setIcon("link")
+            .onClick(() => {
+              void this.copyPersistentUrl(file);
+            });
+        });
+      })
+    );
+  }
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+  private registerProtocolHandler() {
+    this.registerObsidianProtocolHandler(
+      "open-document",
+      async (params) => {
+        const id = typeof params?.id === "string" ? params.id.trim() : "";
+        const vaultParam =
+          typeof params?.vault === "string" ? params.vault.trim() : "";
+        if (!id) {
+          new Notice("Persistent URL is missing an id.");
+          return;
+        }
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
+        if (vaultParam && vaultParam !== this.app.vault.getName()) {
+          new Notice(
+            `Persistent link targets "${vaultParam}", open that vault first.`
+          );
+          return;
+        }
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+        const modal = new ProgressModal(this.app, "Opening persistent link...");
+        modal.open();
+        try {
+          const file = await this.findFileByPersistentId(id, (current, total) => {
+            modal.updateProgress(current, total);
+          });
 
-	}
+          if (!file) {
+            new Notice("No note matches that persistent id.");
+            return;
+          }
 
-	onunload() {
-	}
+          await this.app.workspace.getLeaf(false).openFile(file);
+          new Notice(`Opened ${file.basename}`);
+        } catch (error) {
+          console.error(error);
+          new Notice("Failed to open persistent link.");
+        } finally {
+          modal.close();
+        }
+      }
+    );
+  }
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
-	}
+  private async copyPersistentUrl(file: TFile) {
+    try {
+      const id = await this.ensurePersistentId(file);
+      const vaultName = this.app.vault.getName();
+      const url = this.buildShareUrl({ id, vaultName });
+      await this.copyToClipboard(url);
+      new Notice("Persistent URL copied to clipboard.");
+    } catch (error) {
+      console.error(error);
+      new Notice("Unable to create persistent URL.");
+    }
+  }
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+  private buildShareUrl({ id, vaultName }: { id: string; vaultName: string }) {
+    const encodedId = encodeURIComponent(id);
+    const encodedVault = encodeURIComponent(vaultName);
+    if (!this.settings.publicShareUrl.trim()) {
+      return `obsidian://open-document?vault=${encodedVault}&id=${encodedId}`;
+    }
+
+    const base = this.settings.publicShareUrl.trim();
+    const separator = base.includes("?") ? "&" : "?";
+    return `${base}${separator}vault=${encodedVault}&id=${encodedId}`;
+  }
+
+  private getFrontmatterKey() {
+    return this.settings.frontmatterKey?.trim() || DEFAULT_SETTINGS.frontmatterKey;
+  }
+
+  private getFrontmatterKeysToCheck() {
+    const keys = [this.getFrontmatterKey()];
+    for (const legacy of LEGACY_FRONTMATTER_KEYS) {
+      if (!keys.includes(legacy)) {
+        keys.push(legacy);
+      }
+    }
+    return keys;
+  }
+
+  private extractId(frontmatter?: Record<string, unknown> | null) {
+    if (!frontmatter) {
+      return null;
+    }
+
+    for (const key of this.getFrontmatterKeysToCheck()) {
+      const value = frontmatter[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
+    }
+
+    return null;
+  }
+
+  private async ensurePersistentId(file: TFile): Promise<string> {
+    const activeKey = this.getFrontmatterKey();
+    const cache = this.app.metadataCache.getFileCache(file);
+    const cachedId = this.extractId(cache?.frontmatter);
+    if (
+      cachedId &&
+      typeof cache?.frontmatter?.[activeKey] === "string" &&
+      cache.frontmatter[activeKey].trim()
+    ) {
+      return cachedId;
+    }
+
+    const data = await this.app.vault.read(file);
+    const parsed = this.parseFrontmatter(data);
+    let id = this.extractId(parsed.frontmatter) ?? undefined;
+    let needsWrite = false;
+
+    if (!id) {
+      id = this.generateId();
+      needsWrite = true;
+    }
+
+    if (parsed.frontmatter[activeKey] !== id) {
+      parsed.frontmatter[activeKey] = id;
+      needsWrite = true;
+    }
+
+    if (needsWrite) {
+      await this.writeFrontmatter(file, parsed);
+    }
+
+    return id;
+  }
+
+  private parseFrontmatter(content: string): {
+    frontmatter: Record<string, unknown>;
+    body: string;
+  } {
+    const match = content.match(/^---\n([\s\S]*?)\n---\n?/);
+    if (!match || match[1] == null) {
+      return { frontmatter: {}, body: content };
+    }
+
+    const raw = parseYaml(match[1]);
+    const parsed =
+      raw && typeof raw === "object" && !Array.isArray(raw)
+        ? (raw as Record<string, unknown>)
+        : {};
+    const matchedText = match[0] ?? "";
+    const body = content.slice(matchedText.length);
+    return { frontmatter: { ...parsed }, body };
+  }
+
+  private async writeFrontmatter(
+    file: TFile,
+    parsed: { frontmatter: Record<string, unknown>; body: string }
+  ) {
+    const fmBlock = stringifyYaml(parsed.frontmatter).trimEnd();
+    let newContent = `---\n${fmBlock}\n---`;
+    const body = parsed.body;
+    if (body.length > 0 && !body.startsWith("\n")) {
+      newContent += "\n";
+    }
+    if (body.length === 0) {
+      newContent += "\n";
+    }
+    newContent += body;
+    await this.app.vault.modify(file, newContent);
+  }
+
+  private generateId(): string {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+      const r = (Math.random() * 16) | 0;
+      const v = char === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+
+  private async copyToClipboard(value: string) {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+  }
+
+  private async findFileByPersistentId(
+    id: string,
+    onProgress?: (current: number, total: number) => void
+  ): Promise<TFile | null> {
+    const files = this.app.vault.getMarkdownFiles();
+    const total = files.length;
+
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index];
+      if (!file) {
+        continue;
+      }
+      onProgress?.(index + 1, total);
+      const cache = this.app.metadataCache.getFileCache(file);
+      const candidate = this.extractId(cache?.frontmatter);
+      if (candidate === id) {
+        return file;
+      }
+
+      if (!cache?.frontmatter) {
+        const data = await this.app.vault.cachedRead(file);
+        const parsed = this.parseFrontmatter(data);
+        const raw = this.extractId(parsed.frontmatter);
+        if (raw === id) {
+          return file;
+        }
+      }
+    }
+
+    return null;
+  }
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class ProgressModal extends Modal {
+  private statusEl!: HTMLDivElement;
 
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+  constructor(app: App, private message: string) {
+    super(app);
+  }
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
+  onOpen() {
+    this.contentEl.addClass("persistent-progress");
+    this.contentEl.createDiv({ cls: "persistent-progress-spinner" });
+    this.statusEl = this.contentEl.createDiv({ text: this.message });
+    this.statusEl.addClass("persistent-progress-label");
+  }
+
+  updateProgress(current: number, total: number) {
+    if (!this.statusEl) {
+      return;
+    }
+
+    if (!total) {
+      this.statusEl.setText(this.message);
+      return;
+    }
+
+    const percentage = Math.min(100, Math.round((current / total) * 100));
+    this.statusEl.setText(`${this.message} (${percentage}%)`);
+  }
 }
