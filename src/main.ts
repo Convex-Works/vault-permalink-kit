@@ -27,7 +27,9 @@ export default class VaultPermalinkKitPlugin extends Plugin {
   }
 
   private async loadSettings() {
-    const stored = await this.loadData();
+    const stored = (await this.loadData()) as
+      | Partial<VaultPermalinkSettings>
+      | null;
     this.settings = { ...DEFAULT_SETTINGS, ...(stored ?? {}) };
   }
 
@@ -44,7 +46,7 @@ export default class VaultPermalinkKitPlugin extends Plugin {
 
         menu.addItem((item) => {
           item
-            .setTitle("Copy Persistent URL")
+            .setTitle("Copy persistent URL")
             .setIcon("link")
             .onClick(() => {
               void this.copyPersistentUrl(file);
@@ -62,7 +64,7 @@ export default class VaultPermalinkKitPlugin extends Plugin {
         const vaultParam =
           typeof params?.vault === "string" ? params.vault.trim() : "";
         if (!id) {
-          new Notice("Persistent URL is missing an id.");
+          new Notice("Persistent URL is missing an ID.");
           return;
         }
 
@@ -81,7 +83,7 @@ export default class VaultPermalinkKitPlugin extends Plugin {
           });
 
           if (!file) {
-            new Notice("No note matches that persistent id.");
+            new Notice("No note matches that persistent ID.");
             return;
           }
 
@@ -190,16 +192,16 @@ export default class VaultPermalinkKitPlugin extends Plugin {
     body: string;
   } {
     const match = content.match(/^---\n([\s\S]*?)\n---\n?/);
-    if (!match || match[1] == null) {
+    if (!match || typeof match[1] !== "string") {
       return { frontmatter: {}, body: content };
     }
 
-    const raw = parseYaml(match[1]);
+    const rawData = parseYaml(match[1]) as unknown;
     const parsed =
-      raw && typeof raw === "object" && !Array.isArray(raw)
-        ? (raw as Record<string, unknown>)
+      rawData && typeof rawData === "object" && !Array.isArray(rawData)
+        ? (rawData as Record<string, unknown>)
         : {};
-    const matchedText = match[0] ?? "";
+    const matchedText = typeof match[0] === "string" ? match[0] : "";
     const body = content.slice(matchedText.length);
     return { frontmatter: { ...parsed }, body };
   }
@@ -234,19 +236,11 @@ export default class VaultPermalinkKitPlugin extends Plugin {
   }
 
   private async copyToClipboard(value: string) {
-    if (navigator?.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value);
-      return;
+    if (!navigator?.clipboard?.writeText) {
+      throw new Error("Clipboard API is unavailable.");
     }
 
-    const textarea = document.createElement("textarea");
-    textarea.value = value;
-    textarea.style.position = "fixed";
-    textarea.style.opacity = "0";
-    document.body.appendChild(textarea);
-    textarea.select();
-    document.execCommand("copy");
-    document.body.removeChild(textarea);
+    await navigator.clipboard.writeText(value);
   }
 
   private async findFileByPersistentId(

@@ -20,15 +20,15 @@ export class VaultPermalinkSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Vault Permalink Kit" });
+    ;
 
     const frontmatterDesc = document.createDocumentFragment();
     frontmatterDesc.append(
-      "Frontmatter field used to store the persistent ID (default: \"permalink\" to align with Obsidian Publish). "
+      "Frontmatter field used to store the persistent identifier (default: \"permalink\" to align with Obsidian Publish). "
     );
     const warningEl = document.createElement("strong");
     warningEl.textContent =
-      "Changing this after generating links may break older URLs until you re-copy them.";
+      "Changing this after generating links may break older permalinks until you copy them again.";
     frontmatterDesc.append(warningEl);
 
     new Setting(containerEl)
@@ -36,7 +36,7 @@ export class VaultPermalinkSettingTab extends PluginSettingTab {
       .setDesc(frontmatterDesc)
       .addText((text) =>
         text
-          .setPlaceholder("permalink")
+          .setPlaceholder("Permalink key")
           .setValue(this.plugin.settings.frontmatterKey)
           .onChange(async (value) => {
             this.plugin.settings.frontmatterKey = value.trim() || "permalink";
@@ -47,11 +47,11 @@ export class VaultPermalinkSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Public share base URL")
       .setDesc(
-        "Optional HTTPS endpoint that receives vault/id query params and redirects to the obsidian:// protocol."
+        "Optional endpoint that receives vault and note identifiers in the query and redirects back into Obsidian."
       )
       .addText((text) =>
         text
-          .setPlaceholder("https://share.example.com/redirect")
+          .setPlaceholder("Public redirect URL")
           .setValue(this.plugin.settings.publicShareUrl)
           .onChange(async (value) => {
             this.plugin.settings.publicShareUrl = value.trim();
